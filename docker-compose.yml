@@ -17,6 +17,7 @@ services:
 
   db:
     image: mysql:8
+    platform: linux/arm64/v8
     container_name: haul_db
     restart: unless-stopped
     environment:
@@ -29,7 +30,8 @@ services:
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
 
   phpmyadmin:
-    image: phpmyadmin/phpmyadmin:latest
+    image: phpmyadmin:latest
+    platform: linux/arm64/v8
     container_name: haul_phpmyadmin
     restart: unless-stopped
     environment:
@@ -39,6 +41,7 @@ services:
       - "8080:80"
     depends_on:
       - db
+
 
 volumes:
   db_data:
