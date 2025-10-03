@@ -1,3 +1,4 @@
+
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
@@ -7,7 +8,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// MySQL pool
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'db',
   user: process.env.DB_USER || 'root',
@@ -18,7 +18,6 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
-// Simple helper to query with promise
 function q(sql, params = []) {
   return new Promise((resolve, reject) => {
     pool.query(sql, params, (err, rows) => {
@@ -28,26 +27,17 @@ function q(sql, params = []) {
   });
 }
 
-// Health
 app.get('/', (_req, res) => res.send('🚀 Haul API is running'));
 
-// Create round
 app.post('/rounds', async (req, res) => {
   try {
-    const { title, store, dropoff_point, notes, cutoff_time, max_orders } = req.body;
+    const { title, store, notes, cutoff_time, max_orders } = req.body;
     if (!title || !cutoff_time) return res.status(400).json({ error: 'title & cutoff_time required' });
     const sql = `
-      INSERT INTO rounds (title, store, dropoff_point, notes, cutoff_time, max_orders, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+      INSERT INTO rounds (title, store, notes, cutoff_time, max_orders, status)
+      VALUES (?, ?, ?, ?, ?, 'OPEN')
     `;
-    const r = await q(sql, [
-      title,
-      store || null,
-      dropoff_point || null,
-      notes || null,
-      cutoff_time,
-      max_orders || 10
-    ]);
+    const r = await q(sql, [ title, store || null, notes || null, cutoff_time, max_orders || 10 ]);
     res.json({ id: r.insertId });
   } catch (e) {
     console.error(e);
@@ -55,7 +45,6 @@ app.post('/rounds', async (req, res) => {
   }
 });
 
-// List rounds (include order_count)
 app.get('/rounds', async (_req, res) => {
   try {
     const sql = `
@@ -72,7 +61,6 @@ app.get('/rounds', async (_req, res) => {
   }
 });
 
-// Lock round
 app.post('/rounds/:id/lock', async (req, res) => {
   try {
     const id = req.params.id;
@@ -84,7 +72,6 @@ app.post('/rounds/:id/lock', async (req, res) => {
   }
 });
 
-// Close round
 app.post('/rounds/:id/close', async (req, res) => {
   try {
     const id = req.params.id;
@@ -96,7 +83,6 @@ app.post('/rounds/:id/close', async (req, res) => {
   }
 });
 
-// List orders (optional filter by round_id)
 app.get('/orders', async (req, res) => {
   try {
     const { round_id } = req.query;
@@ -113,14 +99,12 @@ app.get('/orders', async (req, res) => {
   }
 });
 
-// Create order
 app.post('/orders', async (req, res) => {
   try {
-    const { round_id, buyer_name, item, qty, size, sweetness, ice, remark } = req.body;
+    const { round_id, buyer_name, dropoff_point, item, qty, size, sweetness, ice, remark } = req.body;
     if (!round_id || !buyer_name || !item) {
       return res.status(400).json({ error: 'round_id, buyer_name, item required' });
     }
-    // check round exists and OPEN and under max limit
     const rows = await q(`
       SELECT id, status, max_orders,
         (SELECT COUNT(*) FROM orders WHERE round_id = ?) AS c
@@ -132,11 +116,11 @@ app.post('/orders', async (req, res) => {
     if (r.max_orders && r.c >= r.max_orders) return res.status(400).json({ error: 'round is full' });
 
     const ins = `
-      INSERT INTO orders (round_id, buyer_name, item, qty, size, sweetness, ice, remark)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (round_id, buyer_name, dropoff_point, item, qty, size, sweetness, ice, remark)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const result = await q(ins, [
-      round_id, buyer_name, item, qty || 1, size || null, sweetness || null, ice || null, remark || null
+      round_id, buyer_name, dropoff_point || null, item, qty || 1, size || null, sweetness || null, ice || null, remark || null
     ]);
     res.json({ id: result.insertId });
   } catch (e) {
