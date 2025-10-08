@@ -1,134 +1,145 @@
-
 const express = require('express');
 const mysql = require('mysql2');
+const bodyParser = require('body-parser');
 const cors = require('cors');
 require('dotenv').config();
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
+// Create MySQL connection pool
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'db',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'secret',
-  database: process.env.DB_NAME || 'haul_app',
-  waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 0
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'haul_app'
 });
 
-function q(sql, params = []) {
+// Initialize Express app
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// 🧩 Helper: Run MySQL query as Promise
+function query(sql, params = []) {
   return new Promise((resolve, reject) => {
-    pool.query(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
+    pool.query(sql, params, (err, results) => {
+      if (err) reject(err);
+      else resolve(results);
     });
   });
 }
 
-app.get('/', (_req, res) => res.send('🚀 Haul API is running'));
-
-app.post('/rounds', async (req, res) => {
-  try {
-    const { title, store, notes, cutoff_time, max_orders } = req.body;
-    if (!title || !cutoff_time) return res.status(400).json({ error: 'title & cutoff_time required' });
-    const sql = `
-      INSERT INTO rounds (title, store, notes, cutoff_time, max_orders, status)
-      VALUES (?, ?, ?, ?, ?, 'OPEN')
-    `;
-    const r = await q(sql, [ title, store || null, notes || null, cutoff_time, max_orders || 10 ]);
-    res.json({ id: r.insertId });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
-  }
+// 🟢 Root test endpoint
+app.get('/', (req, res) => {
+  res.send('🚀 Haul API is running');
 });
 
-app.get('/rounds', async (_req, res) => {
+// 🟢 Get all rounds with order count
+app.get('/rounds', async (req, res) => {
   try {
-    const sql = `
-      SELECT r.*,
-        (SELECT COUNT(*) FROM orders o WHERE o.round_id = r.id) AS order_count
+    const rounds = await query(`
+      SELECT r.*, COUNT(o.id) AS order_count
       FROM rounds r
-      ORDER BY r.created_at DESC, r.id DESC
-    `;
-    const rows = await q(sql);
-    res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+      LEFT JOIN orders o ON r.id = o.round_id
+      GROUP BY r.id
+      ORDER BY r.created_at DESC
+    `);
+    res.json(rounds);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Internal Server Error');
   }
 });
 
+// 🟢 Create a new round (by Runner)
+app.post('/rounds', async (req, res) => {
+  const { title, store, notes, cutoff_time, max_orders } = req.body;
+  try {
+    const sql = `
+      INSERT INTO rounds (title, store, notes, cutoff_time, max_orders)
+      VALUES (?, ?, ?, ?, ?)
+    `;
+    await query(sql, [title, store, notes, cutoff_time, max_orders]);
+    res.status(201).json({ message: 'Round created successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to create round');
+  }
+});
+
+// 🟢 Lock a round (prevent new orders)
 app.post('/rounds/:id/lock', async (req, res) => {
   try {
-    const id = req.params.id;
-    const r = await q('UPDATE rounds SET status="LOCKED" WHERE id=? AND status="OPEN"', [id]);
-    res.json({ locked: r.affectedRows > 0 });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    const { id } = req.params;
+    await query(`UPDATE rounds SET status='LOCKED' WHERE id=?`, [id]);
+    res.json({ message: `Round ${id} locked` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to lock round');
   }
 });
 
+// 🟢 Close a round (mark complete)
 app.post('/rounds/:id/close', async (req, res) => {
   try {
-    const id = req.params.id;
-    const r = await q('UPDATE rounds SET status="CLOSED" WHERE id=? AND status IN ("OPEN","LOCKED")', [id]);
-    res.json({ closed: r.affectedRows > 0 });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    const { id } = req.params;
+    await query(`UPDATE rounds SET status='CLOSED' WHERE id=?`, [id]);
+    res.json({ message: `Round ${id} closed` });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to close round');
   }
 });
 
-app.get('/orders', async (req, res) => {
+// 🟢 Get orders for a specific round
+app.get('/rounds/:id/orders', async (req, res) => {
+  const { id } = req.params;
   try {
-    const { round_id } = req.query;
-    let rows;
-    if (round_id) {
-      rows = await q('SELECT * FROM orders WHERE round_id=? ORDER BY created_at DESC, id DESC', [round_id]);
-    } else {
-      rows = await q('SELECT * FROM orders ORDER BY created_at DESC, id DESC');
-    }
-    res.json(rows);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    const orders = await query(`SELECT * FROM orders WHERE round_id=?`, [id]);
+    res.json(orders);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to fetch orders');
   }
 });
 
+// 🟢 Add new order (by Buyer)
 app.post('/orders', async (req, res) => {
-  try {
-    const { round_id, buyer_name, dropoff_point, item, qty, size, sweetness, ice, remark } = req.body;
-    if (!round_id || !buyer_name || !item) {
-      return res.status(400).json({ error: 'round_id, buyer_name, item required' });
-    }
-    const rows = await q(`
-      SELECT id, status, max_orders,
-        (SELECT COUNT(*) FROM orders WHERE round_id = ?) AS c
-      FROM rounds WHERE id=?
-    `, [round_id, round_id]);
-    if (!rows.length) return res.status(404).json({ error: 'round not found' });
-    const r = rows[0];
-    if (r.status !== 'OPEN') return res.status(400).json({ error: 'round is not OPEN' });
-    if (r.max_orders && r.c >= r.max_orders) return res.status(400).json({ error: 'round is full' });
+  const { round_id, buyer_name, item, qty, size, sweetness, ice, remark, dropoff_point } = req.body;
 
-    const ins = `
-      INSERT INTO orders (round_id, buyer_name, dropoff_point, item, qty, size, sweetness, ice, remark)
+  try {
+    const sql = `
+      INSERT INTO orders (round_id, buyer_name, item, qty, size, sweetness, ice, remark, dropoff_point)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    const result = await q(ins, [
-      round_id, buyer_name, dropoff_point || null, item, qty || 1, size || null, sweetness || null, ice || null, remark || null
+    await query(sql, [
+      round_id,
+      buyer_name,
+      item,
+      qty || 1,
+      size || null,
+      sweetness || null,
+      ice || null,
+      remark || null,
+      dropoff_point || null
     ]);
-    res.json({ id: result.insertId });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: e.message });
+    res.status(201).json({ message: 'Order added successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to add order');
   }
 });
 
+// 🧩 Error handling
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+});
+
+// 🟢 Start server
 const port = process.env.PORT || 5000;
 app.listen(port, '0.0.0.0', () => {
   console.log(`API listening on port ${port}`);
